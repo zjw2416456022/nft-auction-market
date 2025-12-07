@@ -1,21 +1,11 @@
-module.exports = async ({ deployments, getNamedAccounts }) => {
+module.exports = async ({ getNamedAccounts, deployments }) => {
   const { deploy } = deployments;
   const { deployer } = await getNamedAccounts();
 
-  await deploy("NFT", {
+  await deploy('NFT', {
     from: deployer,
-    args: [],
+    args: [],           
     log: true,
-    proxy: {
-      proxyContract: "OpenZeppelinTransparentProxy",
-      execute: {
-        init: {
-          methodName: "initialize",
-          args: [deployer],
-        },
-      },
-    },
   });
 };
-
-module.exports.tags = ["NFT"];
+module.exports.tags = ['NFT'];
