@@ -14,12 +14,20 @@ import "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.so
  * @title NFT 拍卖市场（支持 ETH 和 USDC 双币种出价）
  * @dev 使用 UUPS 代理模式，支持后续升级
  */
-contract Auction is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
+contract Auction is
+    Initializable,
+    UUPSUpgradeable,
+    OwnableUpgradeable,
+    ReentrancyGuardUpgradeable
+{
     IERC721 public nftContract;           // NFT 合约地址
-    IERC20 public paymentToken;          // 支付用的 ERC20，例如 USDC
+    IERC20 public paymentToken;           // 支付用的 ERC20，例如 USDC
 
     AggregatorV3Interface private ethUsdFeed;       // Chainlink ETH/USD 价格预言机
     AggregatorV3Interface private tokenUsdFeed;     // Chainlink USDC/USD 价格预言机
+
+    address public feeTo;                                 // 手续费接收地址（平台钱包）
+    uint256 public constant FEE_PRECISION = 10_000;       // 手续费精度：10000 = 100%，方便计算万分比
 
     // 每场拍卖的信息
     struct AuctionInfo {
@@ -38,8 +46,9 @@ contract Auction is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reentran
 
     event AuctionCreated(uint256 indexed auctionId, uint256 tokenId, address seller, uint256 duration);
     event NewBid(uint256 indexed auctionId, address bidder, uint256 usdAmount, bool isEth);
-    event AuctionEnded(uint256 indexed auctionId, address winner, uint256 usdAmount);
-    event AuctionNoBid(uint256 indexed auctionId); // 无人出价的情况（改名避免与之前冲突）
+    event AuctionEnded(uint256 indexed auctionId, address winner, uint256 usdAmount, uint256 feeAmount);
+    event AuctionNoBid(uint256 indexed auctionId); // 无人出价的情况
+    event FeeWithdrawn(address indexed to, uint256 ethAmount, uint256 tokenAmount); // 平台提取手续费事件
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -52,25 +61,59 @@ contract Auction is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reentran
      * @param _paymentToken ERC20 代币地址（如 USDC）
      * @param _ethUsdFeed Chainlink ETH/USD 预言机地址
      * @param _tokenUsdFeed Chainlink USDC/USD 预言机地址
+     * @param _feeTo 平台手续费接收地址（设为 owner 或多签钱包）
      */
     function initialize(
         address _nft,
         address _paymentToken,
         address _ethUsdFeed,
-        address _tokenUsdFeed
+        address _tokenUsdFeed,
+        address _feeTo
     ) external initializer {
         __Ownable_init(msg.sender);
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
 
-        nftContract   = IERC721(_nft);         
-        paymentToken  = IERC20(_paymentToken);   
+        nftContract   = IERC721(_nft);
+        paymentToken  = IERC20(_paymentToken);
         ethUsdFeed    = AggregatorV3Interface(_ethUsdFeed);
         tokenUsdFeed  = AggregatorV3Interface(_tokenUsdFeed);
+        feeTo         = _feeTo;
     }
 
     // 只有 owner 可以升级合约
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    /**
+     * @dev 根据成交金额（美元等值）计算手续费率
+     *      < $1,000      → 2.5%（250/10000）
+     *      $1,000~$10,000 → 1.5%（150/10000）
+     *      ≥ $10,000     → 0.8%（80/10000）
+     */
+    function _calculateFeeRate(uint256 usdAmount) internal pure returns (uint256) {
+        if (usdAmount < 1_000 * 1e18) {
+            return 250;   // 2.5%
+        } else if (usdAmount < 10_000 * 1e18) {
+            return 150;   // 1.5%
+        } else {
+            return 80;    // 0.8%
+        }
+    }
+
+    /**
+     * @dev 计算手续费并拆分金额
+     * @return netAmount 卖家实际收到
+     * @return feeAmount 平台手续费
+     */
+    function _splitFee(
+        uint256 rawAmount,
+        uint256 usdAmount
+    ) internal pure returns (uint256 netAmount, uint256 feeAmount) {
+        uint256 feeRate = _calculateFeeRate(usdAmount);
+        feeAmount = (rawAmount * feeRate) / FEE_PRECISION;
+        netAmount = rawAmount - feeAmount;
+    }
+
 
     /**
      * @dev 创建一场拍卖
@@ -124,10 +167,11 @@ contract Auction is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reentran
         uint256 usdValue = _toUsdValue(isEth, rawAmount);
         require(usdValue > a.highestBidUsd, unicode"出价必须高于当前最高");
 
-        // 退还上一位出价者的资金
-        if (a.highestBidder != address(0)) {
+        // 退还上一位出价者的资金（退全款，不扣手续费）
+        if (a.highestBidder != address(address(0))) {
             if (a.isEth) {
-                payable(a.highestBidder).transfer(a.rawAmount);
+                (bool success, ) = payable(a.highestBidder).call{value: a.rawAmount}("");
+                require(success, unicode"ETH 退还失败");
             } else {
                 paymentToken.transfer(a.highestBidder, a.rawAmount);
             }
@@ -143,7 +187,7 @@ contract Auction is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reentran
     }
 
     /**
-     * @dev 结束拍卖
+     * @dev 结束拍卖（核心逻辑：计算手续费 + 分配资金）
      */
     function endAuction(uint256 auctionId) external nonReentrant {
         AuctionInfo storage a = auctions[auctionId];
@@ -155,16 +199,25 @@ contract Auction is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reentran
         if (a.highestBidder == address(0)) {
             // 无人出价，归还 NFT 给卖家
             nftContract.safeTransferFrom(address(this), a.seller, a.tokenId);
-            emit AuctionNoBid(auctionId);   // 改用已定义的事件
+            emit AuctionNoBid(auctionId);
         } else {
-            // 有出价，转移 NFT 给赢家，资金给卖家
+            // 有出价：计算手续费
+            (uint256 netAmount, uint256 feeAmount) = _splitFee(a.rawAmount, a.highestBidUsd);
+
+            // 转移 NFT 给赢家
             nftContract.safeTransferFrom(address(this), a.highestBidder, a.tokenId);
+
+            // 给卖家转净收入，平台收手续费
             if (a.isEth) {
-                payable(a.seller).transfer(a.rawAmount);
+                (bool success1, ) = payable(a.seller).call{value: netAmount}("");
+                (bool success2, ) = payable(feeTo).call{value: feeAmount}("");
+                require(success1 && success2, unicode"ETH 转账失败");
             } else {
-                paymentToken.transfer(a.seller, a.rawAmount);
+                paymentToken.transfer(a.seller, netAmount);
+                paymentToken.transfer(feeTo, feeAmount);
             }
-            emit AuctionEnded(auctionId, a.highestBidder, a.highestBidUsd);
+
+            emit AuctionEnded(auctionId, a.highestBidder, a.highestBidUsd, feeAmount);
         }
     }
 
@@ -182,5 +235,24 @@ contract Auction is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reentran
 
     function getAuction(uint256 auctionId) external view returns (AuctionInfo memory) {
         return auctions[auctionId];
+    }
+
+    /**
+     * @dev 平台 owner 提取合约中累积的 ETH 和 USDC 手续费
+     */
+    function withdrawFees() external onlyOwner {
+        uint256 ethBalance = address(this).balance;
+        uint256 tokenBalance = paymentToken.balanceOf(address(this));
+
+        if (ethBalance > 0) {
+            (bool success, ) = payable(owner()).call{value: ethBalance}("");
+            require(success, "ETH withdraw failed");
+        }
+
+        if (tokenBalance > 0) {
+            paymentToken.transfer(owner(), tokenBalance);
+        }
+
+        emit FeeWithdrawn(owner(), ethBalance, tokenBalance);
     }
 }

@@ -19,7 +19,8 @@ module.exports = async ({ getNamedAccounts, deployments, getChainId }) => {
           nft.address,
           USDC_ADDRESS,
           ETH_USD_FEED,
-          USDC_USD_FEED
+          USDC_USD_FEED,
+          deployer.address // ← 手续费给部署者（可换成平台多签）
         ],
       },
     },

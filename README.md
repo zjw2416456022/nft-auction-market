@@ -1,52 +1,108 @@
-# NFT 拍卖市场 - 大作业完整项目
+# NFT 拍卖市场
 
-## 项目功能
+## 项目概述
 
-本项目实现了一个支持 **ETH 和 USDC 双币种出价、美元等值竞价** 的 NFT 拍卖市场，具备以下特性：
+本项目实现了一个支持 **ETH 和 USDC 双币种出价、美元等值竞价** 的 NFT 拍卖市场。主要功能包括：
 
 - 使用 UUPS 代理模式，支持未来无缝升级
-- 集成 Chainlink 预言机，实现 ETH / USDC → USD 实时换算
-- 最高美元等值者获胜，公平透明
-- 使用 `_safeMint` + `ERC721Holder`，防止 NFT 永久丢失
-- 支持无人出价自动退回 NFT
-- 100% 通过单元测试，覆盖率 >98%
+- 集成 Chainlink 预言机，实现出价金额实时换算成美元比较
+- 支持动态手续费（根据成交金额不同费率）
+- 无人出价时 NFT 自动退回卖家
+- 所有关键操作都有事件记录，便于前端监听
 
-## 合约地址（Sepolia）
+项目已在 **Sepolia 测试网**成功部署并通过完整功能测试。
 
-| 合约       | 地址                                                                 | 验证状态 |
-|------------|----------------------------------------------------------------------|----------|
-| NFT        | 0x741d49afa12d577bdf89988a72eb93538e760a4d                                                   | 已验证   |
-| Auction (Proxy) | 0x6BEF43F8425754b23cE05c43700641d715a97032                                              | 已验证   |
-| Auction (Implementation) | 0x8afBE5d2D50B39F62073Dd1582D5ecfB89B3D985                                          |          |
+## 功能说明
 
-**Sepolia 浏览器链接**：
-- NFT: https://sepolia.etherscan.io/address/0x741d49afa12d577bdf89988a72eb93538e760a4d
-- Auction: https://sepolia.etherscan.io/address/0x6BEF43F8425754b23cE05c43700641d715a97032
+- **NFT 铸造**：通过 `safeMint` 安全铸造，防止 NFT 永久丢失
+- **创建拍卖**：卖家上架 NFT，最短持续时间 5 分钟
+- **双币种出价**：
+  - `bidWithEth()`：用 ETH 出价
+  - `bidWithToken()`：用 USDC 出价
+- **美元等值比较**：通过 Chainlink 获取实时价格，统一按美元价值比较
+- **动态手续费**：
+  - < $1,000 → 2.5%
+  - $1,000 ~ $10,000 → 1.5%
+  - ≥ $10,000 → 0.8%
+  - 手续费直接转给平台地址（`feeTo`）
+- **拍卖结束**：自动转移 NFT 和资金，包含手续费扣除
+- **安全设计**：
+  - 使用 `ReentrancyGuard` 防止重入攻击
+  - 使用 `safeTransferFrom` 和 `_safeMint`
+  - 所有关键操作都有事件触发
 
-**交易哈希**：
-- NFT 部署: https://sepolia.etherscan.io/tx/0x1371da7de8503c5b6944aa9f8da00bca9aef202e8f944a29cc7d4b517537ad08
-- Auction 部署: https://sepolia.etherscan.io/tx/0x0d7dbcfddae8432cdf5daa0d4bb3aa05af7f7de71ff82e0627e86e94a8ff2386
+## 合约地址（Sepolia 测试网）
+
+| 合约           | 地址                                                                 |
+|----------------|----------------------------------------------------------------------|
+| NFT            | [0x741D49aFa12d577bdF89988a72eB93538e760a4D](https://sepolia.etherscan.io/address/0x741d49afa12d577bdf89988a72eb93538e760a4d) |
+| Auction（代理）| [0x6BEF43F8425754b23cE05c43700641d715a97032](https://sepolia.etherscan.io/address/0x6BEF43F8425754b23cE05c43700641d715a97032) |
+
+> 前端请使用 **Auction 代理地址** `0x6BEF...` 进行交互
+
+## 项目结构
+
+```
+contracts/
+├── NFT.sol              # 简单的 ERC721 NFT
+├── Auction.sol          # 主拍卖合约（支持升级 + 动态手续费）
+└── mocks/               # 测试用模拟合约
+
+deploy/
+├── 01_deploy_nft.js
+└── 02_deploy_auction.js
+
+test/
+└── Auction.test.js      # 完整功能测试
+
+hardhat.config.js
+.env.example
+```
+
+## 技术栈
+
+- Solidity ^0.8.24
+- Hardhat + hardhat-deploy + hardhat-upgrades
+- OpenZeppelin Contracts v5
+- Chainlink 预言机（Sepolia）
+- 测试框架：Mocha + Chai
+
+## 测试情况
+
+已编写完整测试，共 **9 个用例全部通过**，覆盖以下核心场景：
+
+```bash
+NFT Auction 完整测试（含动态手续费）
+  √ ETH 出价 $800 → 2.5% 手续费 (509ms)
+  √ USDC 出价 $8000 → 1.5% 手续费
+  √ ETH 出价 $15000 → 0.8% 手续费
+  √ 多人激烈竞价 - 最后出价最高者获胜 + 所有人都被正确退款
+  √ ETH + USDC 混合竞价 - 美元最高者获胜
+  √ 无人出价 → NFT 自动退回卖家，无手续费
+  √ 平台直接收到手续费（无需提取）
+  √ 动态手续费 - 小额出价
+  √ 动态手续费 - 高额出价
+
+  9 passing (750ms)
+```
 
 ## 部署步骤
 
 ```bash
-# 1. 克隆项目并安装依赖
-git clone <你的仓库>
-cd nft-auction-market
+# 安装依赖
 npm install
 
-# 2. 配置 .env 文件
+# 配置环境变量
 cp .env.example .env
 # 填写 SEPOLIA_RPC_URL 和 PRIVATE_KEY
 
-# 3. 编译
+# 编译
 npx hardhat compile
 
-# 4. 运行测试（必须全绿）
+# 测试（确保全通过）
 npx hardhat test
 
-# 5. 部署到 Sepolia
+# 部署到 Sepolia
 npx hardhat deploy --network sepolia
+```
 
-# 6. 验证合约（可选但推荐）
-npx hardhat verify --network sepolia <地址>

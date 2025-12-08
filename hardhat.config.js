@@ -1,4 +1,5 @@
 require("@nomicfoundation/hardhat-toolbox");
+require("hardhat-coverage");
 require("hardhat-deploy");
 require("@openzeppelin/hardhat-upgrades");
 require("dotenv").config();

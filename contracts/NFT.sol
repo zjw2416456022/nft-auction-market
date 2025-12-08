@@ -15,7 +15,7 @@ contract NFT is ERC721Enumerable, Ownable {
 
     function mint(address to) external onlyOwner returns (uint256) {
         uint256 tokenId = _nextTokenId++;
-        _safeMint(to, tokenId); // 必须用 safeMint！防止 NFT 永久丢失
+        _safeMint(to, tokenId);
         return tokenId;
     }
 
